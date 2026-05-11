@@ -41,15 +41,15 @@ jobs:
       - name: Download modules
         run: cd backend && go mod download
 
+      - name: Create embed placeholder
+        # go:embed is evaluated at vet and build time; dist/main.js must exist.
+        run: mkdir -p backend/dist && touch backend/dist/main.js
+
       - name: Vet
         run: cd backend && go vet ./...
 
-      - name: Build (no dist/main.js needed for compile check)
-        run: |
-          # Create a placeholder so the go:embed directive doesn't fail.
-          mkdir -p backend/dist
-          touch backend/dist/main.js
-          cd backend && go build -o /dev/null .
+      - name: Build
+        run: cd backend && go build -o /dev/null .
 
   # ──────────────────────────────────────────────────────────────────────────
   # Helm: lint
