@@ -178,10 +178,27 @@ func getMongoClient(ctx context.Context, details *ConnectionDetails, cacheKey st
 // Helper: extract the X-Everest-User JWT and required query params
 // ---------------------------------------------------------------------------
 
+// extractJWT returns the bearer token the backend should use when calling
+// the Everest credential broker.
+//
+// Precedence:
+//  1. X-Everest-User — set by the host proxy once that feature is live.
+//  2. Authorization: Bearer <token> — forwarded by the proxy in the
+//     meantime and usable directly against the Everest API.
+func extractJWT(r *http.Request) (string, error) {
+	if v := r.Header.Get("X-Everest-User"); v != "" {
+		return v, nil
+	}
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer "), nil
+	}
+	return "", fmt.Errorf("no auth token: expected X-Everest-User header or Authorization: Bearer")
+}
+
 func extractParams(r *http.Request) (jwt, cluster, namespace string, err error) {
-	jwt = r.Header.Get("X-Everest-User")
-	if jwt == "" {
-		return "", "", "", fmt.Errorf("missing X-Everest-User header")
+	jwt, err = extractJWT(r)
+	if err != nil {
+		return "", "", "", err
 	}
 	cluster = r.URL.Query().Get("cluster")
 	namespace = r.URL.Query().Get("namespace")
@@ -284,9 +301,9 @@ type QueryRequest struct {
 
 // POST /api/query
 func handleQuery(w http.ResponseWriter, r *http.Request) {
-	jwt := r.Header.Get("X-Everest-User")
-	if jwt == "" {
-		apiError(w, http.StatusBadRequest, "missing X-Everest-User header")
+	jwt, err := extractJWT(r)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
