@@ -48,27 +48,19 @@ func everestAPIURL() string {
 }
 
 // ---------------------------------------------------------------------------
-// Connection-details broker
+// Credentials broker
 // ---------------------------------------------------------------------------
 
-// ConnectionDetails is the response from
-// GET /v1/namespaces/{ns}/database-clusters/{name}/connection-details.
-// The exact shape is defined by the OpenEverest core; we handle both a
-// pre-built URI and individual credential fields.
-type ConnectionDetails struct {
-	// If the core returns a ready-to-use MongoDB URI, use it directly.
-	ConnectionString string `json:"connectionString"`
-	// Alternatively, individual fields are used to build a URI.
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	Username   string `json:"username"`
-	Password   string `json:"password"`
-	ReplicaSet string `json:"replicaSet"`
-	TLS        bool   `json:"tls"`
+// Credentials is the response from
+// GET /v1/namespaces/{ns}/database-clusters/{name}/credentials
+type Credentials struct {
+	ConnectionURL string `json:"connectionUrl"`
+	Username      string `json:"username"`
+	Password      string `json:"password"`
 }
 
-func getConnectionDetails(ctx context.Context, jwt, namespace, cluster string) (*ConnectionDetails, error) {
-	apiURL := fmt.Sprintf("%s/v1/namespaces/%s/database-clusters/%s/connection-details",
+func getCredentials(ctx context.Context, jwt, namespace, cluster string) (*Credentials, error) {
+	apiURL := fmt.Sprintf("%s/v1/namespaces/%s/database-clusters/%s/credentials",
 		everestAPIURL(),
 		url.PathEscape(namespace),
 		url.PathEscape(cluster),
@@ -82,59 +74,31 @@ func getConnectionDetails(ctx context.Context, jwt, namespace, cluster string) (
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("connection-details request failed: %w", err)
+		return nil, fmt.Errorf("credentials request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("connection-details returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("credentials endpoint returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	var details ConnectionDetails
-	if err := json.Unmarshal(body, &details); err != nil {
-		return nil, fmt.Errorf("failed to decode connection-details: %w", err)
+	var creds Credentials
+	if err := json.Unmarshal(body, &creds); err != nil {
+		return nil, fmt.Errorf("failed to decode credentials: %w", err)
 	}
-	return &details, nil
+	return &creds, nil
 }
 
-func buildMongoURI(d *ConnectionDetails) string {
-	if d.ConnectionString != "" {
-		return d.ConnectionString
+// buildMongoURI derives a MongoDB connection URI from the credentials response.
+// The API returns a ready-made connectionUrl; we use it directly when present.
+// When only username/password are returned we have no host to connect to, so
+// an error is surfaced early rather than silently producing a broken URI.
+func buildMongoURI(creds *Credentials) (string, error) {
+	if creds.ConnectionURL != "" {
+		return creds.ConnectionURL, nil
 	}
-
-	// Build from parts.
-	host := d.Host
-	if host == "" {
-		host = "localhost"
-	}
-	if d.Port > 0 {
-		host = fmt.Sprintf("%s:%d", host, d.Port)
-	}
-
-	var sb strings.Builder
-	sb.WriteString("mongodb://")
-	if d.Username != "" {
-		sb.WriteString(url.QueryEscape(d.Username))
-		sb.WriteByte(':')
-		sb.WriteString(url.QueryEscape(d.Password))
-		sb.WriteByte('@')
-	}
-	sb.WriteString(host)
-
-	params := url.Values{}
-	if d.ReplicaSet != "" {
-		params.Set("replicaSet", d.ReplicaSet)
-	}
-	if d.TLS {
-		params.Set("tls", "true")
-	}
-	if len(params) > 0 {
-		sb.WriteByte('/')
-		sb.WriteByte('?')
-		sb.WriteString(params.Encode())
-	}
-	return sb.String()
+	return "", fmt.Errorf("credentials response contained no connectionUrl")
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +115,7 @@ var (
 	clientCache   = map[string]*cachedClient{}
 )
 
-func getMongoClient(ctx context.Context, details *ConnectionDetails, cacheKey string) (*mongo.Client, error) {
+func getMongoClient(ctx context.Context, creds *Credentials, cacheKey string) (*mongo.Client, error) {
 	clientCacheMu.Lock()
 	defer clientCacheMu.Unlock()
 
@@ -164,7 +128,10 @@ func getMongoClient(ctx context.Context, details *ConnectionDetails, cacheKey st
 		delete(clientCache, cacheKey)
 	}
 
-	uri := buildMongoURI(details)
+	uri, err := buildMongoURI(creds)
+	if err != nil {
+		return nil, err
+	}
 	clientOpts := options.Client().
 		ApplyURI(uri).
 		SetConnectTimeout(10 * time.Second).
@@ -229,13 +196,13 @@ func getClient(r *http.Request) (*mongo.Client, error) {
 		return nil, err
 	}
 
-	details, err := getConnectionDetails(ctx, jwt, namespace, cluster)
+	creds, err := getCredentials(ctx, jwt, namespace, cluster)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get connection details: %w", err)
+		return nil, fmt.Errorf("failed to get credentials: %w", err)
 	}
 
 	cacheKey := namespace + "/" + cluster
-	return getMongoClient(ctx, details, cacheKey)
+	return getMongoClient(ctx, creds, cacheKey)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -332,14 +299,14 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	details, err := getConnectionDetails(ctx, jwt, req.Namespace, req.Cluster)
+	creds, err := getCredentials(ctx, jwt, req.Namespace, req.Cluster)
 	if err != nil {
-		apiError(w, http.StatusInternalServerError, "failed to get connection details: "+err.Error())
+		apiError(w, http.StatusInternalServerError, "failed to get credentials: "+err.Error())
 		return
 	}
 
 	cacheKey := req.Namespace + "/" + req.Cluster
-	client, err := getMongoClient(ctx, details, cacheKey)
+	client, err := getMongoClient(ctx, creds, cacheKey)
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, "mongo connect: "+err.Error())
 		return
