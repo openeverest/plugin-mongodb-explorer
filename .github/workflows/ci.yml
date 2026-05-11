@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Frontend: type-check + build
+  # ──────────────────────────────────────────────────────────────────────────
+  frontend:
+    name: Frontend (tsc + vite build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - run: npm ci
+      - run: npm run build
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Backend: go vet + build
+  # ──────────────────────────────────────────────────────────────────────────
+  backend:
+    name: Backend (go vet + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: backend/go.sum
+
+      - name: Download modules
+        run: cd backend && go mod download
+
+      - name: Vet
+        run: cd backend && go vet ./...
+
+      - name: Build (no dist/main.js needed for compile check)
+        run: |
+          # Create a placeholder so the go:embed directive doesn't fail.
+          mkdir -p backend/dist
+          touch backend/dist/main.js
+          cd backend && go build -o /dev/null .
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Helm: lint
+  # ──────────────────────────────────────────────────────────────────────────
+  helm-lint:
+    name: Helm lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: "3.14.0"
+
+      - run: helm lint charts/plugin-mongodb-explorer/

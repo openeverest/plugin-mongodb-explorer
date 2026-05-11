@@ -1,0 +1,6 @@
+apiVersion: v2
+name: plugin-mongodb-explorer
+description: Helm chart for the OpenEverest MongoDB Explorer Plugin
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

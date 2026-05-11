@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.local
+
+# Go
+backend/vendor/
+
+# OS
+.DS_Store
