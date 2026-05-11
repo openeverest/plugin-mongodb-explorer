@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -95,11 +96,19 @@ func getCredentials(ctx context.Context, jwt, k8sCluster, namespace, instance st
 	return &creds, nil
 }
 
+// duplicatePortRe matches a port that appears twice consecutively in a MongoDB
+// URI host list, e.g. "host:27017:27017/" or "host:27017:27017,".
+// This is a known quirk of the Everest connection endpoint where the port
+// field is appended again after the last replica-set member's port.
+var duplicatePortRe = regexp.MustCompile(`:([0-9]+):[0-9]+([,/?]|$)`)
+
 func buildMongoURI(creds *Credentials) (string, error) {
-	if creds.URI != "" {
-		return creds.URI, nil
+	if creds.URI == "" {
+		return "", fmt.Errorf("credentials response contained no uri field")
 	}
-	return "", fmt.Errorf("credentials response contained no uri field")
+	// Strip duplicate port (e.g. ":27017:27017/" → ":27017/").
+	uri := duplicatePortRe.ReplaceAllString(creds.URI, ":$1$2")
+	return uri, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -48,6 +48,9 @@ jobs:
       - name: Vet
         run: cd backend && go vet ./...
 
+      - name: Test
+        run: cd backend && go test ./...
+
       - name: Build
         run: cd backend && go build -o /dev/null .
 
