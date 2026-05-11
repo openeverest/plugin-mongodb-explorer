@@ -52,18 +52,23 @@ func everestAPIURL() string {
 // ---------------------------------------------------------------------------
 
 // Credentials is the response from
-// GET /v1/namespaces/{ns}/database-clusters/{name}/credentials
+// GET /v1/clusters/{k8sCluster}/namespaces/{ns}/instances/{name}/connection
 type Credentials struct {
-	ConnectionURL string `json:"connectionUrl"`
-	Username      string `json:"username"`
-	Password      string `json:"password"`
+	URI      string `json:"uri"`
+	Host     string `json:"host"`
+	Port     string `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Provider string `json:"provider"`
+	Type     string `json:"type"`
 }
 
-func getCredentials(ctx context.Context, jwt, namespace, cluster string) (*Credentials, error) {
-	apiURL := fmt.Sprintf("%s/v1/namespaces/%s/database-clusters/%s/credentials",
+func getCredentials(ctx context.Context, jwt, k8sCluster, namespace, instance string) (*Credentials, error) {
+	apiURL := fmt.Sprintf("%s/v1/clusters/%s/namespaces/%s/instances/%s/connection",
 		everestAPIURL(),
+		url.PathEscape(k8sCluster),
 		url.PathEscape(namespace),
-		url.PathEscape(cluster),
+		url.PathEscape(instance),
 	)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
@@ -90,15 +95,11 @@ func getCredentials(ctx context.Context, jwt, namespace, cluster string) (*Crede
 	return &creds, nil
 }
 
-// buildMongoURI derives a MongoDB connection URI from the credentials response.
-// The API returns a ready-made connectionUrl; we use it directly when present.
-// When only username/password are returned we have no host to connect to, so
-// an error is surfaced early rather than silently producing a broken URI.
 func buildMongoURI(creds *Credentials) (string, error) {
-	if creds.ConnectionURL != "" {
-		return creds.ConnectionURL, nil
+	if creds.URI != "" {
+		return creds.URI, nil
 	}
-	return "", fmt.Errorf("credentials response contained no connectionUrl")
+	return "", fmt.Errorf("credentials response contained no uri field")
 }
 
 // ---------------------------------------------------------------------------
@@ -174,34 +175,38 @@ func extractJWT(r *http.Request) (string, error) {
 	return "", fmt.Errorf("no auth token: expected X-Everest-User header or Authorization: Bearer")
 }
 
-func extractParams(r *http.Request) (jwt, cluster, namespace string, err error) {
+func extractParams(r *http.Request) (jwt, k8sCluster, instance, namespace string, err error) {
 	jwt, err = extractJWT(r)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
-	cluster = r.URL.Query().Get("cluster")
+	k8sCluster = r.URL.Query().Get("k8sCluster")
+	if k8sCluster == "" {
+		k8sCluster = "main"
+	}
+	instance = r.URL.Query().Get("cluster")
 	namespace = r.URL.Query().Get("namespace")
-	if cluster == "" || namespace == "" {
-		return "", "", "", fmt.Errorf("cluster and namespace query parameters are required")
+	if instance == "" || namespace == "" {
+		return "", "", "", "", fmt.Errorf("cluster and namespace query parameters are required")
 	}
-	return jwt, cluster, namespace, nil
+	return jwt, k8sCluster, instance, namespace, nil
 }
 
 func getClient(r *http.Request) (*mongo.Client, error) {
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
-	jwt, cluster, namespace, err := extractParams(r)
+	jwt, k8sCluster, instance, namespace, err := extractParams(r)
 	if err != nil {
 		return nil, err
 	}
 
-	creds, err := getCredentials(ctx, jwt, namespace, cluster)
+	creds, err := getCredentials(ctx, jwt, k8sCluster, namespace, instance)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get credentials: %w", err)
 	}
 
-	cacheKey := namespace + "/" + cluster
+	cacheKey := k8sCluster + "/" + namespace + "/" + instance
 	return getMongoClient(ctx, creds, cacheKey)
 }
 
@@ -268,6 +273,7 @@ func handleListCollections(w http.ResponseWriter, r *http.Request) {
 
 // QueryRequest is the payload for POST /api/query.
 type QueryRequest struct {
+	K8sCluster string         `json:"k8sCluster"`
 	Cluster    string         `json:"cluster"`
 	Namespace  string         `json:"namespace"`
 	DB         string         `json:"db"`
@@ -295,17 +301,20 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, "cluster, namespace, db, and collection are required")
 		return
 	}
+	if req.K8sCluster == "" {
+		req.K8sCluster = "main"
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	creds, err := getCredentials(ctx, jwt, req.Namespace, req.Cluster)
+	creds, err := getCredentials(ctx, jwt, req.K8sCluster, req.Namespace, req.Cluster)
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, "failed to get credentials: "+err.Error())
 		return
 	}
 
-	cacheKey := req.Namespace + "/" + req.Cluster
+	cacheKey := req.K8sCluster + "/" + req.Namespace + "/" + req.Cluster
 	client, err := getMongoClient(ctx, creds, cacheKey)
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, "mongo connect: "+err.Error())

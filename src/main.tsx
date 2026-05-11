@@ -24,21 +24,22 @@ async function apiFetch(path: string, opts?: RequestInit) {
   return res.json();
 }
 
-async function fetchDatabases(cluster: string, namespace: string): Promise<string[]> {
+async function fetchDatabases(k8sCluster: string, instance: string, namespace: string): Promise<string[]> {
   const data = await apiFetch(
-    `/databases?cluster=${encodeURIComponent(cluster)}&namespace=${encodeURIComponent(namespace)}`
+    `/databases?k8sCluster=${encodeURIComponent(k8sCluster)}&cluster=${encodeURIComponent(instance)}&namespace=${encodeURIComponent(namespace)}`
   );
   return data.databases ?? [];
 }
 
-async function fetchCollections(cluster: string, namespace: string, db: string): Promise<string[]> {
+async function fetchCollections(k8sCluster: string, instance: string, namespace: string, db: string): Promise<string[]> {
   const data = await apiFetch(
-    `/databases/${encodeURIComponent(db)}/collections?cluster=${encodeURIComponent(cluster)}&namespace=${encodeURIComponent(namespace)}`
+    `/databases/${encodeURIComponent(db)}/collections?k8sCluster=${encodeURIComponent(k8sCluster)}&cluster=${encodeURIComponent(instance)}&namespace=${encodeURIComponent(namespace)}`
   );
   return data.collections ?? [];
 }
 
 async function runQuery(
+  k8sCluster: string,
   cluster: string,
   namespace: string,
   db: string,
@@ -66,7 +67,7 @@ async function runQuery(
   const data = await apiFetch('/query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cluster, namespace, db, collection, filter, projection, limit }),
+    body: JSON.stringify({ k8sCluster, cluster, namespace, db, collection, filter, projection, limit }),
   });
   return data.documents ?? [];
 }
@@ -116,12 +117,13 @@ const styles = {
 // ---------------------------------------------------------------------------
 
 interface DatabaseTreeProps {
+  k8sCluster: string;
   cluster: string;
   namespace: string;
   onSelectCollection: (db: string, collection: string) => void;
 }
 
-const DatabaseTree = ({ cluster, namespace, onSelectCollection }: DatabaseTreeProps) => {
+const DatabaseTree = ({ k8sCluster, cluster, namespace, onSelectCollection }: DatabaseTreeProps) => {
   const [databases, setDatabases] = React.useState<string[]>([]);
   const [expanded, setExpanded] = React.useState<Set<string>>(new Set());
   const [collections, setCollections] = React.useState<Record<string, string[]>>({});
@@ -132,11 +134,11 @@ const DatabaseTree = ({ cluster, namespace, onSelectCollection }: DatabaseTreePr
   React.useEffect(() => {
     setLoading(true);
     setError(null);
-    fetchDatabases(cluster, namespace)
+    fetchDatabases(k8sCluster, cluster, namespace)
       .then(setDatabases)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
-  }, [cluster, namespace]);
+  }, [k8sCluster, cluster, namespace]);
 
   const toggleDb = (db: string) => {
     const next = new Set(expanded);
@@ -149,7 +151,7 @@ const DatabaseTree = ({ cluster, namespace, onSelectCollection }: DatabaseTreePr
     setExpanded(next);
     if (!collections[db]) {
       setColLoading((prev) => ({ ...prev, [db]: true }));
-      fetchCollections(cluster, namespace, db)
+      fetchCollections(k8sCluster, cluster, namespace, db)
         .then((cols) => setCollections((prev) => ({ ...prev, [db]: cols })))
         .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
         .finally(() => setColLoading((prev) => ({ ...prev, [db]: false })));
@@ -220,13 +222,14 @@ function formatCellValue(v: unknown): string {
 }
 
 interface QueryPanelProps {
+  k8sCluster: string;
   cluster: string;
   namespace: string;
   initialDb: string | null;
   initialCollection: string | null;
 }
 
-const QueryPanel = ({ cluster, namespace, initialDb, initialCollection }: QueryPanelProps) => {
+const QueryPanel = ({ k8sCluster, cluster, namespace, initialDb, initialCollection }: QueryPanelProps) => {
   const [db, setDb] = React.useState(initialDb ?? '');
   const [collection, setCollection] = React.useState(initialCollection ?? '');
   const [filter, setFilter] = React.useState('{}');
@@ -248,7 +251,7 @@ const QueryPanel = ({ cluster, namespace, initialDb, initialCollection }: QueryP
     }
     setLoading(true);
     setError(null);
-    runQuery(cluster, namespace, db, collection, filter, projection, parseInt(limit, 10) || 20)
+    runQuery(k8sCluster, cluster, namespace, db, collection, filter, projection, parseInt(limit, 10) || 20)
       .then((docs) => {
         setResults(docs);
       })
@@ -477,10 +480,15 @@ const MongoExplorerTab = (props: ClusterDetailTabProps) => {
   const [selectedDb, setSelectedDb] = React.useState<string | null>(null);
   const [selectedCollection, setSelectedCollection] = React.useState<string | null>(null);
 
-  const cluster = props.cluster as { engine?: string; [k: string]: unknown };
+  const clusterObj = props.cluster as { engine?: string; clusterName?: string; [k: string]: unknown };
+
+  // The Everest-registered cluster name is needed to build API URLs.
+  // It lives on the cluster resource object; fall back to "main" (the default
+  // cluster name in single-cluster Everest deployments).
+  const k8sCluster = (clusterObj?.clusterName as string) ?? 'main';
 
   // Only render content for PSMDB (MongoDB) clusters.
-  if (cluster.engine && cluster.engine !== 'psmdb') {
+  if (clusterObj.engine && clusterObj.engine !== 'psmdb') {
     return React.createElement(
       'div',
       { style: { padding: '2rem', color: '#666' } },
@@ -531,6 +539,7 @@ const MongoExplorerTab = (props: ClusterDetailTabProps) => {
         'Databases'
       ),
       React.createElement(DatabaseTree, {
+        k8sCluster,
         cluster: props.instanceName,
         namespace: props.namespace,
         onSelectCollection: handleSelectCollection,
@@ -555,6 +564,7 @@ const MongoExplorerTab = (props: ClusterDetailTabProps) => {
         'Query'
       ),
       React.createElement(QueryPanel, {
+        k8sCluster,
         cluster: props.instanceName,
         namespace: props.namespace,
         initialDb: selectedDb,
