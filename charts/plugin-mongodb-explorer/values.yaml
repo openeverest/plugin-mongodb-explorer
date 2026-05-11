@@ -31,9 +31,12 @@ plugin:
       path: mongodb-explorer
       label: MongoDB Explorer
 
-# URL of the OpenEverest API server, used by the backend to fetch
-# cluster connection details. Defaults to the in-cluster service address.
-everestAPIURL: "http://everest-server.everest-system.svc.cluster.local:8080"
+# Optional override for the Everest API URL. When left empty the backend
+# auto-discovers the everest Service via Kubernetes-injected env vars
+# (EVEREST_SERVICE_HOST / EVEREST_SERVICE_PORT), which are available for
+# free when the plugin runs in the same namespace as the everest Service.
+# Only set this for local dev or non-standard deployments.
+everestAPIURL: ""
 
 resources:
   limits:

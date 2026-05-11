@@ -29,10 +29,22 @@ var distFS embed.FS
 // ---------------------------------------------------------------------------
 
 func everestAPIURL() string {
+	// Explicit override wins (useful for local dev or air-gapped setups).
 	if v := os.Getenv("EVEREST_API_URL"); v != "" {
 		return strings.TrimRight(v, "/")
 	}
-	return "http://everest-server.everest-system.svc.cluster.local:8080"
+	// Kubernetes automatically injects <SVCNAME>_SERVICE_HOST / _SERVICE_PORT
+	// for every Service in the same namespace, so we get this for free when
+	// the plugin pod runs alongside the "everest" Service in everest-system.
+	if host := os.Getenv("EVEREST_SERVICE_HOST"); host != "" {
+		port := os.Getenv("EVEREST_SERVICE_PORT")
+		if port == "" {
+			port = "8080"
+		}
+		return "http://" + host + ":" + port
+	}
+	// Fallback: stable DNS name of the everest Service.
+	return "http://everest.everest-system.svc.cluster.local:8080"
 }
 
 // ---------------------------------------------------------------------------

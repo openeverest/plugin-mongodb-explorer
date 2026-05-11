@@ -29,8 +29,10 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.service.port | quote }}
+            {{- if .Values.everestAPIURL }}
             - name: EVEREST_API_URL
               value: {{ .Values.everestAPIURL | quote }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
