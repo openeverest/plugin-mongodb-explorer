@@ -5,18 +5,18 @@ import type {
   ClusterDetailTabProps,
 } from '@openeverest/plugin-sdk';
 
-// React is provided by the host at runtime to avoid duplicate instances.
+// React and fetch are provided by the host at runtime.
 let React: PluginApi['React'];
-
-const PLUGIN_NAME = 'mongo-explorer';
-const API_BASE = `/v1/plugins/${PLUGIN_NAME}/api`;
+let pluginFetch: PluginApi['fetch'];
 
 // ---------------------------------------------------------------------------
 // API helpers
 // ---------------------------------------------------------------------------
 
+// Uses api.fetch() so the host proxy receives a valid session, generates the
+// X-Everest-User JWT, and forwards it to the backend.
 async function apiFetch(path: string, opts?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, opts);
+  const res = await pluginFetch(`/api${path}`, opts);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(text || `HTTP ${res.status}`);
@@ -589,6 +589,7 @@ const MongoExplorerPage = (_props: PluginRouteProps) => {
 
 const register: PluginRegisterFn = (api: PluginApi) => {
   React = api.React;
+  pluginFetch = api.fetch.bind(api);
 
   api.registerExtension({
     type: 'sidebarItem',
