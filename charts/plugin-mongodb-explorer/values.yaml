@@ -19,6 +19,7 @@ plugin:
   vendor: "OpenEverest"
   enabled: true
   bundlePath: "/main.js"
+  icon: "/icon.png"
   extensionPoints:
     - type: route
       path: /mongodb-explorer
@@ -26,7 +27,7 @@ plugin:
     - type: sidebarItem
       path: /mongodb-explorer
       label: MongoDB Explorer
-      icon: "/v1/plugins/plugin-mongodb-explorer/icon.png"
+      icon: "/icon.png"
     - type: clusterDetailTab
       path: mongodb-explorer
       label: MongoDB Explorer
