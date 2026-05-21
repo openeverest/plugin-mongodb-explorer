@@ -7,6 +7,20 @@ A generic plugin for [OpenEverest](https://github.com/openeverest/openeverest) t
 - Run `find` queries with filter, projection, limit, and sort
 - View results as a table or raw JSON
 
+## Install with Helm
+
+```bash
+helm upgrade mongo-explorer oci://ghcr.io/openeverest/charts/plugin-mongodb-explorer \
+   --version 0.1.9 \
+   -n everest-system --install
+```
+
+## Uninstall
+
+```bash
+helm uninstall mongo-explorer -n everest-system
+```
+
 ## Architecture
 
 ```
@@ -96,21 +110,6 @@ The frontend must be pre-built before building the Docker image:
 npm run build                                   # produces dist/main.js
 cd backend && go mod tidy && cd ..              # generates go.sum
 docker build -t plugin-mongodb-explorer:dev .
-```
-
-## Install with Helm
-
-```bash
-helm install mongo-explorer charts/plugin-mongodb-explorer/ \
-  -n everest-system \
-  --set image.repository=<your-registry>/plugin-mongodb-explorer \
-  --set image.tag=<tag>
-```
-
-## Uninstall
-
-```bash
-helm uninstall mongo-explorer -n everest-system
 ```
 
 ## Configuration (`values.yaml`)
