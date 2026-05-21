@@ -25,6 +25,9 @@ import (
 //go:embed dist/main.js
 var distFS embed.FS
 
+//go:embed dist/icon.png
+var iconData []byte
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -385,6 +388,13 @@ func main() {
 		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(data)
+	})
+
+	// Serve the plugin icon.
+	mux.HandleFunc("GET /icon.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(iconData)
 	})
 
 	// Backend API — proxied by the host from /v1/plugins/mongo-explorer/api/*.

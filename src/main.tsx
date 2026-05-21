@@ -604,7 +604,6 @@ const register: PluginRegisterFn = (api: PluginApi) => {
   api.registerExtension({
     type: 'sidebarItem',
     label: 'MongoDB Explorer',
-    icon: 'storage',
   });
 
   api.registerExtension({
