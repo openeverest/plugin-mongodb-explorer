@@ -11,7 +11,7 @@ A generic plugin for [OpenEverest](https://github.com/openeverest/openeverest) t
 
 ```bash
 helm upgrade mongo-explorer oci://ghcr.io/openeverest/charts/plugin-mongodb-explorer \
-   --version 0.1.9 \
+   --version 0.1.13 \
    -n everest-system --install
 ```
 
