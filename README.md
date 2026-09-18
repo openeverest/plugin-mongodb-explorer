@@ -3,6 +3,7 @@
 A generic plugin for [OpenEverest](https://github.com/openeverest/openeverest) that adds a
 **MongoDB Explorer** tab to PSMDB cluster detail pages, allowing users to:
 
+- Discover available OpenEverest-managed MongoDB instances from the sidebar
 - Browse databases and collections in the cluster
 - Run `find` queries with filter, projection, limit, and sort
 - View results as a table or raw JSON
@@ -48,10 +49,14 @@ plugin-mongodb-explorer/
 **Request flow:**
 
 ```
-Browser → GET /v1/clusters/{cluster}/plugins/{name}/api/databases
+Browser → GET /v1/clusters/{cluster}/plugins/{name}/api/instances
          ↓ (host validates session, adds X-Everest-User JWT)
-Backend → GET /v1/clusters/{cluster}/namespaces/{ns}/instances/{name}/connection
-         ↓ (uses credentials)
+Backend → GET /v1/clusters
+          GET /v1/clusters/{cluster}/namespaces
+          GET /v1/clusters/{cluster}/namespaces/{namespace}/instances
+         ↓ (selected PSMDB instance)
+Backend → GET /v1/clusters/{cluster}/namespaces/{namespace}/instances/{name}/connection
+         ↓ (short-lived credentials)
 MongoDB → list databases / run query
          ↓
 Browser ← JSON results
@@ -59,6 +64,11 @@ Browser ← JSON results
 
 The backend also serves the frontend bundle at `GET /main.js`, which the OpenEverest
 shell fetches at startup to dynamically load the plugin UI.
+
+The sidebar lists only OpenEverest instances whose provider is
+`percona-server-mongodb`. Users can select an instance from the selector to
+navigate to its existing MongoDB Explorer tab. External MongoDB endpoints are
+not supported yet.
 
 ## Prerequisites
 
@@ -121,12 +131,23 @@ docker build -t plugin-mongodb-explorer:dev .
 | `plugin.enabled` | Enable/disable the plugin | `true` |
 | `everestAPIURL` | OpenEverest API server URL (in-cluster) | `http://everest-server.everest-system.svc.cluster.local:8080` |
 
-## Known Prerequisite
+## Backend API
 
-The backend relies on `GET /v1/namespaces/{ns}/database-clusters/{name}/connection-details`
-to fetch short-lived MongoDB credentials. This endpoint must be implemented in the
-OpenEverest core before the plugin can connect to real clusters. During local
-development, you can mock it to return a static connection string.
+The plugin backend exposes `GET /api/instances` for sidebar discovery. It returns
+instance identity and provider metadata only; MongoDB credentials are never sent
+to the browser. Discovery follows the OpenEverest cluster → namespace → instance
+hierarchy and uses the forwarded user's JWT, so OpenEverest RBAC restrictions are
+preserved.
+
+When the user selects an instance, the backend calls the OpenEverest connection
+endpoint to obtain short-lived credentials and uses them to query MongoDB:
+
+```text
+GET /v1/clusters/{cluster}/namespaces/{namespace}/instances/{name}/connection
+```
+
+The selected OpenEverest version must provide the v2 cluster/namespace/instance
+API and connection endpoint.
 
 ## License
 

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +68,77 @@ type Credentials struct {
 	Password string `json:"password"`
 	Provider string `json:"provider"`
 	Type     string `json:"type"`
+}
+
+// ExplorerInstance is the minimal instance metadata returned to the plugin
+// frontend. Credentials are intentionally not part of this response.
+type ExplorerInstance struct {
+	K8sCluster string `json:"k8sCluster"`
+	Namespace  string `json:"namespace"`
+	Name       string `json:"name"`
+	Provider   string `json:"provider"`
+}
+
+type explorerObjectMetadata struct {
+	Name   string            `json:"name"`
+	Labels map[string]string `json:"labels"`
+}
+
+type explorerClusterList struct {
+	Items []struct {
+		Name string `json:"name"`
+	} `json:"items"`
+}
+
+type explorerInstanceList struct {
+	Items []struct {
+		Metadata explorerObjectMetadata `json:"metadata"`
+		Spec     struct {
+			Provider    string `json:"provider"`
+			ProviderRef struct {
+				Name string `json:"name"`
+			} `json:"providerRef"`
+		} `json:"spec"`
+	} `json:"items"`
+}
+
+const maxEverestErrorBody = 64 * 1024
+
+// everestHTTPClient is a package variable so tests can replace it with a
+// client using a custom transport. The timeout also protects requests made
+// outside a caller-supplied discovery deadline.
+var everestHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+// doEverestJSON performs an authenticated request against the OpenEverest API
+// and decodes its JSON response into destination.
+func doEverestJSON(ctx context.Context, jwt, path string, destination any) error {
+	apiURL := strings.TrimRight(everestAPIURL(), "/") + "/" + strings.TrimLeft(path, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := everestHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("Everest request %s failed: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxEverestErrorBody))
+		message := strings.TrimSpace(string(body))
+		if message == "" {
+			message = http.StatusText(resp.StatusCode)
+		}
+		return fmt.Errorf("Everest request %s returned %d: %s", path, resp.StatusCode, message)
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(destination); err != nil {
+		return fmt.Errorf("decode Everest response %s: %w", path, err)
+	}
+	return nil
 }
 
 func getCredentials(ctx context.Context, jwt, k8sCluster, namespace, instance string) (*Credentials, error) {
@@ -240,6 +312,91 @@ func apiError(w http.ResponseWriter, status int, msg string) {
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+func discoverMongoInstances(ctx context.Context, jwt string) ([]ExplorerInstance, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	var clusters explorerClusterList
+	if err := doEverestJSON(ctx, jwt, "/v1/clusters", &clusters); err != nil {
+		return nil, err
+	}
+
+	instancesByKey := make(map[string]ExplorerInstance)
+	for _, cluster := range clusters.Items {
+		clusterName := cluster.Name
+		if clusterName == "" {
+			continue
+		}
+
+		namespacePath := fmt.Sprintf("/v1/clusters/%s/namespaces", url.PathEscape(clusterName))
+		var namespaces []string
+		if err := doEverestJSON(ctx, jwt, namespacePath, &namespaces); err != nil {
+			return nil, err
+		}
+
+		for _, namespaceName := range namespaces {
+			if namespaceName == "" {
+				continue
+			}
+
+			instancesPath := fmt.Sprintf("/v1/clusters/%s/namespaces/%s/instances",
+				url.PathEscape(clusterName), url.PathEscape(namespaceName))
+			var listed explorerInstanceList
+			if err := doEverestJSON(ctx, jwt, instancesPath, &listed); err != nil {
+				return nil, err
+			}
+
+			for _, instance := range listed.Items {
+				provider := instance.Spec.Provider
+				if provider == "" {
+					provider = instance.Spec.ProviderRef.Name
+				}
+				if provider == "" {
+					provider = instance.Metadata.Labels["core.openeverest.io/provider"]
+				}
+				if provider != "percona-server-mongodb" || instance.Metadata.Name == "" {
+					continue
+				}
+				explorerInstance := ExplorerInstance{
+					K8sCluster: clusterName,
+					Namespace:  namespaceName,
+					Name:       instance.Metadata.Name,
+					Provider:   provider,
+				}
+				key := explorerInstance.K8sCluster + "/" + explorerInstance.Namespace + "/" + explorerInstance.Name
+				instancesByKey[key] = explorerInstance
+			}
+		}
+	}
+
+	instances := make([]ExplorerInstance, 0, len(instancesByKey))
+	for _, instance := range instancesByKey {
+		instances = append(instances, instance)
+	}
+	sort.Slice(instances, func(i, j int) bool {
+		left := instances[i].K8sCluster + "/" + instances[i].Namespace + "/" + instances[i].Name
+		right := instances[j].K8sCluster + "/" + instances[j].Namespace + "/" + instances[j].Name
+		return left < right
+	})
+	return instances, nil
+}
+
+// GET /api/instances
+func handleListInstances(w http.ResponseWriter, r *http.Request) {
+	jwt, err := extractJWT(r)
+	if err != nil {
+		apiError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	instances, err := discoverMongoInstances(r.Context(), jwt)
+	if err != nil {
+		apiError(w, http.StatusBadGateway, "instance discovery failed: "+err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"instances": instances})
+}
 
 // GET /api/databases?cluster=X&namespace=Y
 func handleListDatabases(w http.ResponseWriter, r *http.Request) {
@@ -417,7 +574,7 @@ func handleBundle(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(bundleData)
 }
 
-func main() {
+func newMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Serve the frontend bundle — the host fetches this to load the plugin UI.
@@ -432,6 +589,7 @@ func main() {
 
 	// Backend API — proxied by the host from
 	// /v1/clusters/{cluster}/plugins/{name}/api/*.
+	mux.HandleFunc("GET /api/instances", handleListInstances)
 	mux.HandleFunc("GET /api/databases", handleListDatabases)
 	mux.HandleFunc("GET /api/databases/{db}/collections", handleListCollections)
 	mux.HandleFunc("POST /api/query", handleQuery)
@@ -441,6 +599,11 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	return mux
+}
+
+func main() {
+	mux := newMux()
 
 	port := os.Getenv("PORT")
 	if port == "" {

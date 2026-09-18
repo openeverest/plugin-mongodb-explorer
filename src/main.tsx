@@ -24,6 +24,18 @@ async function apiFetch(path: string, opts?: RequestInit) {
   return res.json();
 }
 
+interface MongoInstanceTarget {
+  k8sCluster: string;
+  namespace: string;
+  name: string;
+  provider: string;
+}
+
+async function fetchMongoInstances(): Promise<MongoInstanceTarget[]> {
+  const data = await apiFetch('/instances');
+  return Array.isArray(data.instances) ? data.instances : [];
+}
+
 async function fetchDatabases(k8sCluster: string, instance: string, namespace: string): Promise<string[]> {
   const data = await apiFetch(
     `/databases?k8sCluster=${encodeURIComponent(k8sCluster)}&cluster=${encodeURIComponent(instance)}&namespace=${encodeURIComponent(namespace)}`
@@ -473,29 +485,14 @@ const QueryPanel = ({ k8sCluster, cluster, namespace, initialDb, initialCollecti
 };
 
 // ---------------------------------------------------------------------------
-// MongoExplorerTab — clusterDetailTab entry point
+// MongoExplorer — reusable database/collection explorer
 // ---------------------------------------------------------------------------
 
-const MongoExplorerTab = (props: ClusterDetailTabProps) => {
+interface MongoExplorerProps { target: MongoInstanceTarget }
+
+const MongoExplorer = ({ target }: MongoExplorerProps) => {
   const [selectedDb, setSelectedDb] = React.useState<string | null>(null);
   const [selectedCollection, setSelectedCollection] = React.useState<string | null>(null);
-
-  const clusterObj = props.cluster as { engine?: string; clusterName?: string; [k: string]: unknown };
-
-  // The Everest-registered cluster name is needed to build API URLs.
-  // It lives on the cluster resource object; fall back to "main" (the default
-  // cluster name in single-cluster Everest deployments).
-  const k8sCluster = (clusterObj?.clusterName as string) ?? 'main';
-
-  // Only render content for PSMDB (MongoDB) clusters.
-  if (clusterObj.engine && clusterObj.engine !== 'psmdb') {
-    return React.createElement(
-      'div',
-      { style: { padding: '2rem', color: '#666' } },
-      'MongoDB Explorer is only available for PSMDB (MongoDB) clusters.'
-    );
-  }
-
   const handleSelectCollection = (db: string, coll: string) => {
     setSelectedDb(db);
     setSelectedCollection(coll);
@@ -503,75 +500,48 @@ const MongoExplorerTab = (props: ClusterDetailTabProps) => {
 
   return React.createElement(
     'div',
-    {
-      style: {
-        display: 'flex',
-        height: '100%',
-        minHeight: '520px',
-        gap: 0,
-      },
-    },
-    // Left: database/collection tree
+    { style: { display: 'flex', height: '100%', minHeight: '520px', gap: 0 } },
     React.createElement(
       'div',
-      {
-        style: {
-          width: '220px',
-          flexShrink: 0,
-          borderRight: '1px solid #e0e0e0',
-          padding: '1rem 0.75rem 1rem 1rem',
-          overflowY: 'auto',
-          background: '#fafafa',
-        },
-      },
-      React.createElement(
-        'div',
-        {
-          style: {
-            fontSize: '0.7rem',
-            fontWeight: '700',
-            textTransform: 'uppercase',
-            letterSpacing: '0.08em',
-            color: '#888',
-            marginBottom: '0.5rem',
-          },
-        },
-        'Databases'
-      ),
-      React.createElement(DatabaseTree, {
-        k8sCluster,
-        cluster: props.instanceName,
-        namespace: props.namespace,
-        onSelectCollection: handleSelectCollection,
-      })
+      { style: { width: '220px', flexShrink: 0, borderRight: '1px solid #e0e0e0', padding: '1rem 0.75rem 1rem 1rem', overflowY: 'auto', background: '#fafafa' } },
+      React.createElement('div', { style: { fontSize: '0.7rem', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.08em', color: '#888', marginBottom: '0.5rem' } }, 'Databases'),
+      React.createElement(DatabaseTree, { k8sCluster: target.k8sCluster, cluster: target.name, namespace: target.namespace, onSelectCollection: handleSelectCollection })
     ),
-    // Right: query panel
     React.createElement(
       'div',
       { style: { flex: 1, padding: '1rem', overflowY: 'auto' } },
-      React.createElement(
-        'div',
-        {
-          style: {
-            fontSize: '0.7rem',
-            fontWeight: '700',
-            textTransform: 'uppercase',
-            letterSpacing: '0.08em',
-            color: '#888',
-            marginBottom: '0.75rem',
-          },
-        },
-        'Query'
-      ),
-      React.createElement(QueryPanel, {
-        k8sCluster,
-        cluster: props.instanceName,
-        namespace: props.namespace,
-        initialDb: selectedDb,
-        initialCollection: selectedCollection,
-      })
+      React.createElement('div', { style: { fontSize: '0.7rem', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.08em', color: '#888', marginBottom: '0.75rem' } }, 'Query'),
+      React.createElement(QueryPanel, { k8sCluster: target.k8sCluster, cluster: target.name, namespace: target.namespace, initialDb: selectedDb, initialCollection: selectedCollection })
     )
   );
+};
+
+function instanceKey(instance: MongoInstanceTarget): string {
+  return `${instance.k8sCluster}/${instance.namespace}/${instance.name}`;
+}
+
+function targetFromClusterDetailProps(props: ClusterDetailTabProps): MongoInstanceTarget {
+  const clusterObj = props.cluster as { engine?: string; clusterName?: string; spec?: { provider?: string; clusterName?: string }; [k: string]: unknown };
+  return {
+    k8sCluster: clusterObj.clusterName ?? clusterObj.spec?.clusterName ?? 'main',
+    namespace: props.namespace,
+    name: props.instanceName,
+    provider: clusterObj.spec?.provider ?? 'percona-server-mongodb',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// MongoExplorerTab — clusterDetailTab entry point
+// ---------------------------------------------------------------------------
+
+const MongoExplorerTab = (props: ClusterDetailTabProps) => {
+  const target = targetFromClusterDetailProps(props);
+  const clusterObj = props.cluster as { engine?: string; spec?: { provider?: string }; [k: string]: unknown };
+  const provider = clusterObj.spec?.provider ?? clusterObj.engine;
+  if (provider && provider !== 'psmdb' && provider !== 'percona-server-mongodb') {
+    return React.createElement('div', { style: { padding: '2rem', color: '#666' } }, 'MongoDB Explorer is only available for PSMDB (MongoDB) clusters.');
+  }
+  return React.createElement(MongoExplorer, { key: instanceKey(target), target });
 };
 
 // ---------------------------------------------------------------------------
@@ -579,17 +549,169 @@ const MongoExplorerTab = (props: ClusterDetailTabProps) => {
 // ---------------------------------------------------------------------------
 
 const MongoExplorerPage = (_props: PluginRouteProps) => {
+  const [instances, setInstances] = React.useState<MongoInstanceTarget[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const loadInstances = () => {
+    setLoading(true);
+    setError(null);
+    fetchMongoInstances().then((found) => {
+      const mongoInstances = found.filter((i) => i.provider === 'percona-server-mongodb').sort((a, b) => instanceKey(a).localeCompare(instanceKey(b)));
+      setInstances(mongoInstances);
+    }).catch((e: unknown) => setError(e instanceof Error ? e.message : String(e))).finally(() => setLoading(false));
+  };
+
+  React.useEffect(() => { loadInstances(); }, []);
+
+  const navigateToInstance = (instance: MongoInstanceTarget) => {
+    window.location.assign(`/databases/${encodeURIComponent(instance.namespace)}/${encodeURIComponent(instance.name)}/mongodb-explorer`);
+  };
+
   return React.createElement(
     'div',
-    { style: { padding: '2rem' } },
-    React.createElement('h1', { style: { marginBottom: '0.5rem' } }, 'MongoDB Explorer'),
+    { style: { padding: '1.5rem', height: '100%', boxSizing: 'border-box', overflowY: 'auto' } },
+    React.createElement('h1', { style: { margin: '0 0 0.5rem' } }, 'MongoDB Explorer'),
     React.createElement(
       'p',
-      { style: { color: '#555' } },
-      'Open a MongoDB (PSMDB) cluster and use the ',
-      React.createElement('strong', null, 'MongoDB Explorer'),
-      ' tab to browse its databases and run queries.'
-    )
+      { style: { margin: '0 0 1.5rem', color: '#555', fontSize: '0.9rem', lineHeight: '1.4' } },
+      'Discover and query OpenEverest-managed MongoDB instances. Select an instance below to browse databases, view collections, and run find queries.'
+    ),
+    loading
+      ? React.createElement('p', { style: styles.muted }, 'Loading MongoDB instances…')
+      : error
+      ? React.createElement(
+          'div',
+          null,
+          React.createElement('p', { style: styles.error }, error),
+          React.createElement('button', { style: styles.btn(true), onClick: loadInstances }, 'Retry')
+        )
+      : instances.length === 0
+      ? React.createElement(
+          'p',
+          { style: styles.muted },
+          'No OpenEverest MongoDB instances are available. Deploy a MongoDB instance or ask your administrator for access.'
+        )
+      : React.createElement(
+          'div',
+          { style: { background: '#fff', border: '1px solid #e0e0e0', borderRadius: '6px', overflow: 'hidden', maxWidth: '900px' } },
+          React.createElement(
+            'table',
+            { style: { width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' } },
+            React.createElement(
+              'thead',
+              null,
+              React.createElement(
+                'tr',
+                null,
+                React.createElement(
+                  'th',
+                  {
+                    style: {
+                      padding: '0.6rem 0.85rem',
+                      background: '#f0f4fb',
+                      borderBottom: '2px solid #c5d0e0',
+                      textAlign: 'left',
+                      fontWeight: '600',
+                      color: '#333',
+                    },
+                  },
+                  'Name'
+                ),
+                React.createElement(
+                  'th',
+                  {
+                    style: {
+                      padding: '0.6rem 0.85rem',
+                      background: '#f0f4fb',
+                      borderBottom: '2px solid #c5d0e0',
+                      textAlign: 'left',
+                      fontWeight: '600',
+                      color: '#333',
+                    },
+                  },
+                  'Namespace'
+                ),
+                React.createElement(
+                  'th',
+                  {
+                    style: {
+                      padding: '0.6rem 0.85rem',
+                      background: '#f0f4fb',
+                      borderBottom: '2px solid #c5d0e0',
+                      textAlign: 'left',
+                      fontWeight: '600',
+                      color: '#333',
+                    },
+                  },
+                  'K8s Cluster'
+                ),
+                React.createElement(
+                  'th',
+                  {
+                    style: {
+                      padding: '0.6rem 0.85rem',
+                      background: '#f0f4fb',
+                      borderBottom: '2px solid #c5d0e0',
+                      textAlign: 'right',
+                      fontWeight: '600',
+                      color: '#333',
+                    },
+                  },
+                  'Action'
+                )
+              )
+            ),
+            React.createElement(
+              'tbody',
+              null,
+              ...instances.map((instance, i) =>
+                React.createElement(
+                  'tr',
+                  {
+                    key: instanceKey(instance),
+                    style: {
+                      borderBottom: i === instances.length - 1 ? 'none' : '1px solid #eee',
+                      background: i % 2 === 0 ? '#fff' : '#fafafa',
+                      cursor: 'pointer',
+                    },
+                    onClick: () => navigateToInstance(instance),
+                  },
+                  React.createElement(
+                    'td',
+                    { style: { padding: '0.6rem 0.85rem', fontWeight: '600', color: '#1565c0' } },
+                    instance.name
+                  ),
+                  React.createElement(
+                    'td',
+                    { style: { padding: '0.6rem 0.85rem', color: '#555' } },
+                    instance.namespace
+                  ),
+                  React.createElement(
+                    'td',
+                    { style: { padding: '0.6rem 0.85rem', color: '#555' } },
+                    instance.k8sCluster
+                  ),
+                  React.createElement(
+                    'td',
+                    { style: { padding: '0.6rem 0.85rem', textAlign: 'right' } },
+                    React.createElement(
+                      'button',
+                      {
+                        style: { ...styles.btn(true), padding: '0.3rem 0.75rem', fontSize: '0.8rem' },
+                        onClick: (e: { stopPropagation: () => void }) => {
+                          e.stopPropagation();
+                          navigateToInstance(instance);
+                        },
+                      },
+                      'Explore'
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
   );
 };
 
