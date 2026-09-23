@@ -19,9 +19,41 @@ async function apiFetch(path: string, opts?: RequestInit) {
   const res = await pluginFetch(`/api${path}`, opts);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(text || `HTTP ${res.status}`);
+    throw new Error(extractErrorMessage(text) || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+// extractErrorMessage unwraps the backend's nested error envelopes
+// (`{"error":"…"}` possibly wrapping a downstream `{"message":"…"}`) into a
+// single human-readable sentence, so the UI never shows raw JSON.
+function extractErrorMessage(raw: string): string {
+  let msg = (raw ?? '').trim();
+  if (!msg) return '';
+
+  const unwrap = (s: string): string => {
+    try {
+      const parsed = JSON.parse(s);
+      if (parsed && typeof parsed === 'object') {
+        const inner = (parsed as Record<string, unknown>).message ?? (parsed as Record<string, unknown>).error;
+        if (typeof inner === 'string') return inner.trim();
+      }
+    } catch {
+      // Not JSON — fall through.
+    }
+    return s;
+  };
+
+  // Peel envelopes until stable, then grab the deepest embedded JSON message.
+  for (let i = 0; i < 3; i++) {
+    const next = unwrap(msg);
+    if (next === msg) break;
+    msg = next;
+  }
+  const embedded = msg.match(/\{[^{}]*"message"\s*:\s*"([^"]+)"[^{}]*\}/);
+  if (embedded) return embedded[1].trim();
+
+  return msg;
 }
 
 interface MongoInstanceTarget {
@@ -82,6 +114,30 @@ async function runQuery(
     body: JSON.stringify({ k8sCluster, cluster, namespace, db, collection, filter, projection, limit }),
   });
   return data.documents ?? [];
+}
+
+interface OverviewMember {
+  name: string;
+  stateStr: string;
+  health: number;
+  uptimeSeconds: number;
+  lagSeconds: number;
+}
+
+interface ClusterOverview {
+  sharded: boolean;
+  version?: string;
+  replicaSet?: { set: string; members: OverviewMember[] };
+  connections?: { current?: number; available?: number };
+  opcounters?: Record<string, number>;
+  shards?: unknown[];
+  balancer?: { mode?: string; inBalancerRound?: boolean };
+}
+
+async function fetchOverview(k8sCluster: string, cluster: string, namespace: string): Promise<ClusterOverview> {
+  return apiFetch(
+    `/overview?k8sCluster=${encodeURIComponent(k8sCluster)}&cluster=${encodeURIComponent(cluster)}&namespace=${encodeURIComponent(namespace)}`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +307,7 @@ const QueryPanel = ({ k8sCluster, cluster, namespace, initialDb, initialCollecti
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [viewMode, setViewMode] = React.useState<'table' | 'json'>('table');
+  const [cellDetail, setCellDetail] = React.useState<{ column: string; value: unknown } | null>(null);
 
   // Sync selection from the tree.
   React.useEffect(() => { if (initialDb) setDb(initialDb); }, [initialDb]);
@@ -462,7 +519,8 @@ const QueryPanel = ({ k8sCluster, cluster, namespace, initialDb, initialCollecti
                           'td',
                           {
                             key: col,
-                            title: JSON.stringify(doc[col]),
+                            title: 'Click to view full value',
+                            onClick: () => setCellDetail({ column: col, value: doc[col] }),
                             style: {
                               padding: '0.35rem 0.6rem',
                               fontFamily: 'monospace',
@@ -470,6 +528,7 @@ const QueryPanel = ({ k8sCluster, cluster, namespace, initialDb, initialCollecti
                               overflow: 'hidden',
                               textOverflow: 'ellipsis',
                               whiteSpace: 'nowrap',
+                              cursor: 'pointer',
                             },
                           },
                           formatCellValue(doc[col])
@@ -480,6 +539,195 @@ const QueryPanel = ({ k8sCluster, cluster, namespace, initialDb, initialCollecti
                 )
               )
             )
+      ),
+    // ── Cell detail modal ─────────────────────────────────────────────────
+    cellDetail &&
+      React.createElement(
+        'div',
+        {
+          onClick: () => setCellDetail(null),
+          style: {
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.4)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+          },
+        },
+        React.createElement(
+          'div',
+          {
+            onClick: (e: { stopPropagation: () => void }) => e.stopPropagation(),
+            style: {
+              background: '#fff',
+              borderRadius: '6px',
+              padding: '1rem',
+              maxWidth: '80vw',
+              maxHeight: '80vh',
+              display: 'flex',
+              flexDirection: 'column',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.25)',
+            },
+          },
+          React.createElement(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', marginBottom: '0.5rem' } },
+            React.createElement('span', { style: { fontFamily: 'monospace', fontWeight: '700', fontSize: '0.85rem' } }, cellDetail.column),
+            React.createElement(
+              'button',
+              { onClick: () => setCellDetail(null), style: { ...styles.btn(false), padding: '0.2rem 0.6rem' } },
+              'Close'
+            )
+          ),
+          React.createElement(
+            'pre',
+            {
+              style: {
+                background: '#f5f5f5',
+                padding: '0.75rem',
+                borderRadius: '4px',
+                fontSize: '0.8rem',
+                overflow: 'auto',
+                margin: 0,
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              },
+            },
+            typeof cellDetail.value === 'object' && cellDetail.value !== null
+              ? JSON.stringify(cellDetail.value, null, 2)
+              : formatCellValue(cellDetail.value)
+          )
+        )
+      )
+  );
+};
+
+// ---------------------------------------------------------------------------
+// ClusterOverviewStrip — collapsible instance health summary
+// ---------------------------------------------------------------------------
+
+interface ClusterOverviewStripProps {
+  k8sCluster: string;
+  cluster: string;
+  namespace: string;
+}
+
+const overviewHeaderCell: React.CSSProperties = {
+  textAlign: 'left',
+  padding: '0.35rem 0.6rem',
+  color: '#666',
+  fontWeight: '600',
+};
+
+const ClusterOverviewStrip = ({ k8sCluster, cluster, namespace }: ClusterOverviewStripProps) => {
+  const [data, setData] = React.useState<ClusterOverview | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [open, setOpen] = React.useState(false);
+
+  React.useEffect(() => {
+    let active = true;
+    setData(null);
+    setError(null);
+    fetchOverview(k8sCluster, cluster, namespace)
+      .then((d) => { if (active) setData(d); })
+      .catch((e: unknown) => { if (active) setError(e instanceof Error ? e.message : String(e)); });
+    return () => { active = false; };
+  }, [k8sCluster, cluster, namespace]);
+
+  if (error) {
+    const pending = /connection details are not yet available|not yet available/i.test(error);
+    if (pending) {
+      return React.createElement(
+        'div',
+        { style: { ...styles.muted, margin: '0 0 0.75rem' } },
+        'Cluster status will appear once the instance finishes provisioning.'
+      );
+    }
+    return React.createElement('div', { style: { ...styles.error, margin: '0 0 0.75rem' } }, `Cluster status unavailable: ${error}`);
+  }
+  if (!data) {
+    return React.createElement('div', { style: { ...styles.muted, margin: '0 0 0.75rem' } }, 'Loading cluster status…');
+  }
+
+  const rs = data.replicaSet;
+  const primary = rs?.members.find((m) => m.stateStr === 'PRIMARY');
+  const maxLag = rs && rs.members.length > 0 ? Math.max(0, ...rs.members.map((m) => m.lagSeconds)) : 0;
+  const allHealthy = rs ? rs.members.every((m) => m.health === 1) : true;
+
+  const summaryLine = rs
+    ? `${allHealthy ? '●' : '▲'} ${rs.set} · ${primary?.stateStr ?? 'no primary'} · ${rs.members.length} members · lag ${maxLag.toFixed(1)}s`
+    : data.sharded
+    ? '● sharded cluster'
+    : '● standalone';
+
+  return React.createElement(
+    'div',
+    { style: { border: '1px solid #e0e0e0', borderRadius: '6px', marginBottom: '0.75rem', background: '#fff' } },
+    React.createElement(
+      'div',
+      {
+        onClick: () => setOpen((v) => !v),
+        style: { display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 0.75rem', cursor: 'pointer', fontSize: '0.85rem' },
+      },
+      React.createElement('span', { style: { color: allHealthy ? '#2e7d32' : '#e65100', fontWeight: '700' } }, summaryLine),
+      typeof data.connections?.current === 'number' &&
+        React.createElement('span', { style: styles.muted }, `· ${data.connections.current} conns`),
+      data.sharded &&
+        React.createElement('span', { style: styles.muted }, `· ${Array.isArray(data.shards) ? data.shards.length : 0} shards`),
+      React.createElement('span', { style: { marginLeft: 'auto', color: '#888' } }, open ? '▾' : '▸')
+    ),
+    open &&
+      React.createElement(
+        'div',
+        { style: { borderTop: '1px solid #eee', padding: '0.25rem 0.25rem 0.5rem' } },
+        rs
+          ? React.createElement(
+              'table',
+              { style: { width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' } },
+              React.createElement(
+                'thead',
+                null,
+                React.createElement(
+                  'tr',
+                  null,
+                  ...['Member', 'State', 'Health', 'Lag', 'Uptime'].map((h) =>
+                    React.createElement('th', { key: h, style: overviewHeaderCell }, h)
+                  )
+                )
+              ),
+              React.createElement(
+                'tbody',
+                null,
+                ...rs.members.map((m) =>
+                  React.createElement(
+                    'tr',
+                    { key: m.name, style: { borderTop: '1px solid #f0f0f0' } },
+                    React.createElement('td', { style: { padding: '0.35rem 0.6rem', fontFamily: 'monospace' } }, m.name),
+                    React.createElement('td', { style: { padding: '0.35rem 0.6rem', fontWeight: m.stateStr === 'PRIMARY' ? '700' : '400' } }, m.stateStr),
+                    React.createElement('td', { style: { padding: '0.35rem 0.6rem', color: m.health === 1 ? '#2e7d32' : '#c62828' } }, m.health === 1 ? 'up' : 'down'),
+                    React.createElement('td', { style: { padding: '0.35rem 0.6rem' } }, m.stateStr === 'PRIMARY' ? '—' : `${m.lagSeconds.toFixed(1)}s`),
+                    React.createElement('td', { style: { padding: '0.35rem 0.6rem' } }, `${Math.floor(m.uptimeSeconds / 3600)}h`)
+                  )
+                )
+              )
+            )
+          : React.createElement('div', { style: { ...styles.muted, padding: '0.35rem 0.6rem' } }, 'No replica set information available.'),
+        (data.opcounters || data.version) &&
+          React.createElement(
+            'div',
+            { style: { ...styles.muted, padding: '0.5rem 0.6rem 0', display: 'flex', gap: '1rem', flexWrap: 'wrap' } },
+            data.version && React.createElement('span', null, `MongoDB ${data.version}`),
+            data.opcounters &&
+              React.createElement(
+                'span',
+                null,
+                `ops: ${['insert', 'query', 'update', 'delete']
+                  .map((k) => `${k[0]}${data.opcounters?.[k] ?? 0}`)
+                  .join(' ')}`
+              )
+          )
       )
   );
 };
@@ -489,7 +737,6 @@ const QueryPanel = ({ k8sCluster, cluster, namespace, initialDb, initialCollecti
 // ---------------------------------------------------------------------------
 
 interface MongoExplorerProps { target: MongoInstanceTarget }
-
 const MongoExplorer = ({ target }: MongoExplorerProps) => {
   const [selectedDb, setSelectedDb] = React.useState<string | null>(null);
   const [selectedCollection, setSelectedCollection] = React.useState<string | null>(null);
@@ -510,6 +757,7 @@ const MongoExplorer = ({ target }: MongoExplorerProps) => {
     React.createElement(
       'div',
       { style: { flex: 1, padding: '1rem', overflowY: 'auto' } },
+      React.createElement(ClusterOverviewStrip, { k8sCluster: target.k8sCluster, cluster: target.name, namespace: target.namespace }),
       React.createElement('div', { style: { fontSize: '0.7rem', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.08em', color: '#888', marginBottom: '0.75rem' } }, 'Query'),
       React.createElement(QueryPanel, { k8sCluster: target.k8sCluster, cluster: target.name, namespace: target.namespace, initialDb: selectedDb, initialCollection: selectedCollection })
     )
