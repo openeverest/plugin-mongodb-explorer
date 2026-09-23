@@ -9,11 +9,16 @@
     "preview": "vite preview --port 3001"
   },
   "dependencies": {
+    "@emotion/cache": "^11.11.0",
+    "@emotion/react": "^11.11.0",
+    "@emotion/styled": "^11.11.0",
+    "@mui/material": "^7.3.0",
+    "@openeverest/ui-lib": "file:../openeverest/ui/packages/plugin-ui-lib",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
-    "@openeverest/plugin-sdk": "^0.3.0",
+    "@openeverest/plugin-sdk": "file:../openeverest/ui/packages/plugin-sdk",
     "@types/react": "^18.3.28",
     "@vitejs/plugin-react-swc": "^4.3.3",
     "typescript": "^5.2.2",
