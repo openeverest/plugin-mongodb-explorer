@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -442,6 +443,105 @@ func handleListCollections(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"collections": names})
 }
 
+// GET /api/overview?k8sCluster=X&cluster=Y&namespace=Z
+//
+// Returns a compact, read-only health summary of the target instance:
+// replica-set membership + per-secondary replication lag, connection and
+// opcounter vitals, and — for sharded clusters — shard topology and balancer
+// state. All commands are diagnostic reads run against the admin database.
+func handleOverview(w http.ResponseWriter, r *http.Request) {
+	client, err := getClient(r)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	admin := client.Database("admin")
+
+	var hello bson.M
+	if err := admin.RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}).Decode(&hello); err != nil {
+		apiError(w, http.StatusInternalServerError, "hello: "+err.Error())
+		return
+	}
+	isMongos := hello["msg"] == "isdbgrid"
+
+	out := map[string]any{"sharded": isMongos}
+
+	// Replica set status (mongos has no replica set of its own).
+	if !isMongos {
+		var rs bson.M
+		if err := admin.RunCommand(ctx, bson.D{{Key: "replSetGetStatus", Value: 1}}).Decode(&rs); err == nil {
+			out["replicaSet"] = summarizeReplSet(rs)
+		}
+	}
+
+	var ss bson.M
+	if err := admin.RunCommand(ctx, bson.D{{Key: "serverStatus", Value: 1}}).Decode(&ss); err == nil {
+		out["connections"] = ss["connections"]
+		out["opcounters"] = ss["opcounters"]
+		out["uptimeSeconds"] = ss["uptime"]
+		out["version"] = ss["version"]
+	}
+
+	if isMongos {
+		var shards bson.M
+		if err := admin.RunCommand(ctx, bson.D{{Key: "listShards", Value: 1}}).Decode(&shards); err == nil {
+			out["shards"] = shards["shards"]
+		}
+		var bal bson.M
+		if err := admin.RunCommand(ctx, bson.D{{Key: "balancerStatus", Value: 1}}).Decode(&bal); err == nil {
+			out["balancer"] = bal
+		}
+	}
+
+	writeJSON(w, out)
+}
+
+// summarizeReplSet flattens replSetGetStatus into a compact member list with
+// per-secondary replication lag relative to the primary's optime.
+func summarizeReplSet(rs bson.M) map[string]any {
+	members, _ := rs["members"].(bson.A)
+
+	var primaryOptime time.Time
+	for _, m := range members {
+		mm, _ := m.(bson.M)
+		if state, _ := mm["stateStr"].(string); state == "PRIMARY" {
+			if t, ok := mm["optimeDate"].(primitive.DateTime); ok {
+				primaryOptime = t.Time()
+			}
+		}
+	}
+
+	summary := make([]map[string]any, 0, len(members))
+	for _, m := range members {
+		mm, _ := m.(bson.M)
+		var lagSeconds float64
+		if !primaryOptime.IsZero() {
+			if t, ok := mm["optimeDate"].(primitive.DateTime); ok {
+				lagSeconds = primaryOptime.Sub(t.Time()).Seconds()
+				if lagSeconds < 0 {
+					lagSeconds = 0
+				}
+			}
+		}
+		summary = append(summary, map[string]any{
+			"name":          mm["name"],
+			"stateStr":      mm["stateStr"],
+			"health":        mm["health"],
+			"uptimeSeconds": mm["uptime"],
+			"lagSeconds":    lagSeconds,
+		})
+	}
+
+	return map[string]any{
+		"set":     rs["set"],
+		"members": summary,
+	}
+}
+
 // QueryRequest is the payload for POST /api/query.
 type QueryRequest struct {
 	K8sCluster string         `json:"k8sCluster"`
@@ -592,6 +692,7 @@ func newMux() *http.ServeMux {
 	mux.HandleFunc("GET /api/instances", handleListInstances)
 	mux.HandleFunc("GET /api/databases", handleListDatabases)
 	mux.HandleFunc("GET /api/databases/{db}/collections", handleListCollections)
+	mux.HandleFunc("GET /api/overview", handleOverview)
 	mux.HandleFunc("POST /api/query", handleQuery)
 
 	// Health check — used by the host for plugin liveness tracking.
