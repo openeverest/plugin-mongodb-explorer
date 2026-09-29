@@ -1,0 +1,18 @@
+export const Messages = {
+  loading: 'Loading cluster status…',
+  pending: 'Cluster status will appear once the instance finishes provisioning.',
+  unavailable: (error: string) => `Cluster status unavailable: ${error}`,
+  healthy: 'Healthy',
+  degraded: 'Degraded',
+  noPrimary: 'no primary',
+  sharded: 'Sharded cluster',
+  standalone: 'Standalone',
+  connections: (count: number) => `${count} conns`,
+  shards: (count: number) => `${count} shards`,
+  noReplicaSet: 'No replica set information available.',
+  version: (version: string) => `MongoDB ${version}`,
+  opcounters: (summary: string) => `ops: ${summary}`,
+  columns: ['Member', 'State', 'Health', 'Lag', 'Uptime'],
+  up: 'up',
+  down: 'down',
+};
