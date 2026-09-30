@@ -32,8 +32,6 @@ export default defineConfig(({ command }) => ({
       { find: 'components', replacement: srcDir('components') },
       { find: 'utils', replacement: srcDir('utils') },
     ],
-    // @openeverest/* are linked from the core repo with their own node_modules; use this plugin's copies.
-    dedupe: ['@mui/material', '@emotion/react', '@emotion/styled', '@emotion/cache'],
   },
   // Library mode leaves process.env untouched, but bundled MUI reads NODE_ENV.
   define:

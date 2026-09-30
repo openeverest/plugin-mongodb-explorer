@@ -28,11 +28,6 @@ jobs:
           node-version: "20"
           cache: "npm"
 
-      # The plugin-sdk is referenced as a local file:// path. In CI the
-      # monorepo is not present, so we need a published/registry version.
-      # Temporarily replace the local path with the npm-published package
-      # if it exists; otherwise the build proceeds with the local stub
-      # already committed (adjust this step when the SDK is on npm).
       - name: Install dependencies
         run: npm ci
 

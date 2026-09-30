@@ -82,11 +82,7 @@ not supported yet.
 
 ### Build the frontend bundle
 
-The frontend links `@openeverest/plugin-sdk` and `@openeverest/plugin-theme` from a sibling
-checkout of the core repo (`../openeverest`) until they are published. Build them first:
-
 ```bash
-(cd ../openeverest/ui && pnpm --filter @openeverest/plugin-sdk --filter @openeverest/plugin-theme build)
 npm install
 npm run build        # outputs dist/main.js
 ```
