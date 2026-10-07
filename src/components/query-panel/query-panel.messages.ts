@@ -1,0 +1,16 @@
+export const Messages = {
+  database: 'Database',
+  collection: 'Collection',
+  filter: 'Filter (JSON)',
+  projection: 'Projection (optional)',
+  limit: 'Limit',
+  run: 'Run query',
+  running: 'Running…',
+  missingTarget: 'Enter a database and collection name.',
+  documentsReturned: (count: number) => `${count} document(s) returned`,
+  table: 'Table',
+  json: 'JSON',
+  noDocuments: 'No documents found.',
+  viewFullValue: 'Click to view full value',
+  close: 'Close',
+};

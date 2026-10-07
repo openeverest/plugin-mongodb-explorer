@@ -27,7 +27,10 @@ helm uninstall mongo-explorer -n everest-system
 ```
 plugin-mongodb-explorer/
 ├── src/
-│   └── main.tsx              # Frontend — TypeScript/React plugin bundle
+│   ├── main.tsx              # Frontend entry — registers the sidebar item, page and tab
+│   ├── api/                  # Backend calls via the host proxy (api.fetch)
+│   ├── components/           # MUI components, themed by @openeverest/plugin-theme
+│   └── utils/
 ├── backend/
 │   ├── main.go               # Backend — Go HTTP server
 │   └── go.mod
@@ -78,8 +81,6 @@ not supported yet.
 ## Local Development
 
 ### Build the frontend bundle
-
-The `@openeverest/plugin-sdk` package is installed from npm (see `package.json`).
 
 ```bash
 npm install
