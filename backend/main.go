@@ -447,8 +447,9 @@ func handleListCollections(w http.ResponseWriter, r *http.Request) {
 //
 // Returns a compact, read-only health summary of the target instance:
 // replica-set membership + per-secondary replication lag, connection and
-// opcounter vitals, and — for sharded clusters — shard topology and balancer
-// state. All commands are diagnostic reads run against the admin database.
+// opcounter vitals, and — for sharded clusters — shard and config-server
+// member health, active mongos routers and balancer state. All commands are
+// diagnostic reads.
 func handleOverview(w http.ResponseWriter, r *http.Request) {
 	client, err := getClient(r)
 	if err != nil {
@@ -487,10 +488,12 @@ func handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if isMongos {
-		var shards bson.M
-		if err := admin.RunCommand(ctx, bson.D{{Key: "listShards", Value: 1}}).Decode(&shards); err == nil {
-			out["shards"] = shards["shards"]
+		now := time.Now()
+		if t, ok := hello["localTime"].(primitive.DateTime); ok {
+			now = t.Time()
 		}
+		out["topology"] = fetchShardedTopology(ctx, client, now)
+
 		var bal bson.M
 		if err := admin.RunCommand(ctx, bson.D{{Key: "balancerStatus", Value: 1}}).Decode(&bal); err == nil {
 			out["balancer"] = bal
@@ -498,6 +501,136 @@ func handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, out)
+}
+
+// activeRouterWindow matches `sh.status()`: a mongos counts as active when it
+// pinged the config servers within the last minute. Stale entries linger in
+// config.mongos after a router is scaled down, so they are not reported.
+const activeRouterWindow = time.Minute
+
+type mongosDoc struct {
+	ID           string    `bson:"_id"`
+	MongoVersion string    `bson:"mongoVersion"`
+	Up           int64     `bson:"up"`
+	Ping         time.Time `bson:"ping"`
+}
+
+// fetchShardedTopology collects shard, config-server and router state through
+// mongos. Member health comes from mongos's own replica-set monitor
+// (connPoolStats), so no direct connection to shard members is needed. Every
+// command is best-effort: missing data degrades to fewer details, not an error.
+func fetchShardedTopology(ctx context.Context, client *mongo.Client, now time.Time) map[string]any {
+	admin := client.Database("admin")
+
+	var shards, shardMap, poolStats bson.M
+	_ = admin.RunCommand(ctx, bson.D{{Key: "listShards", Value: 1}}).Decode(&shards)
+	_ = admin.RunCommand(ctx, bson.D{{Key: "getShardMap", Value: 1}}).Decode(&shardMap)
+	_ = admin.RunCommand(ctx, bson.D{{Key: "connPoolStats", Value: 1}}).Decode(&poolStats)
+
+	var routers []mongosDoc
+	cursor, err := client.Database("config").Collection("mongos").Find(ctx,
+		bson.M{"ping": bson.M{"$gte": now.Add(-activeRouterWindow)}},
+		options.Find().SetSort(bson.M{"_id": 1}),
+	)
+	if err == nil {
+		_ = cursor.All(ctx, &routers)
+	}
+
+	shardList, _ := shards["shards"].(bson.A)
+	hostMap, _ := shardMap["map"].(bson.M)
+	monitored, _ := poolStats["replicaSets"].(bson.M)
+	return buildShardedTopology(shardList, hostMap, monitored, routers, now)
+}
+
+func buildShardedTopology(shards bson.A, shardMap, monitored bson.M, routers []mongosDoc, now time.Time) map[string]any {
+	shardSummaries := make([]map[string]any, 0, len(shards))
+	for _, s := range shards {
+		shard, _ := s.(bson.M)
+		id, _ := shard["_id"].(string)
+		host, _ := shard["host"].(string)
+		draining, _ := shard["draining"].(bool)
+		summary := summarizeMonitoredSet(host, monitored)
+		summary["id"] = id
+		summary["draining"] = draining
+		shardSummaries = append(shardSummaries, summary)
+	}
+
+	topology := map[string]any{"shards": shardSummaries}
+
+	if configHost, ok := shardMap["config"].(string); ok {
+		topology["configServers"] = summarizeMonitoredSet(configHost, monitored)
+	}
+
+	routerSummaries := make([]map[string]any, 0, len(routers))
+	for _, r := range routers {
+		routerSummaries = append(routerSummaries, map[string]any{
+			"name":               r.ID,
+			"version":            r.MongoVersion,
+			"uptimeSeconds":      r.Up,
+			"lastPingSecondsAgo": max(0, now.Sub(r.Ping).Seconds()),
+		})
+	}
+	topology["routers"] = routerSummaries
+
+	return topology
+}
+
+// summarizeMonitoredSet resolves a "set/host1,host2" connection string into
+// the member list mongos is monitoring for that set. Hosts the monitor does
+// not know about are reported with unknown state and no health value.
+func summarizeMonitoredSet(connString string, monitored bson.M) map[string]any {
+	set, hostList, _ := strings.Cut(connString, "/")
+	if hostList == "" {
+		hostList, set = set, ""
+	}
+
+	monitoredSet, _ := monitored[set].(bson.M)
+	hosts, _ := monitoredSet["hosts"].(bson.A)
+
+	members := make([]map[string]any, 0, len(hosts))
+	for _, h := range hosts {
+		host, _ := h.(bson.M)
+		members = append(members, summarizeMonitoredHost(host))
+	}
+	if len(members) == 0 {
+		for _, addr := range strings.Split(hostList, ",") {
+			if addr != "" {
+				members = append(members, map[string]any{"name": addr, "stateStr": "UNKNOWN"})
+			}
+		}
+	}
+
+	return map[string]any{"set": set, "members": members}
+}
+
+func summarizeMonitoredHost(host bson.M) map[string]any {
+	reachable, _ := host["ok"].(bool)
+	primary, _ := host["ismaster"].(bool)
+	secondary, _ := host["secondary"].(bool)
+	hidden, _ := host["hidden"].(bool)
+
+	state := "UNKNOWN"
+	switch {
+	case !reachable:
+		state = "UNREACHABLE"
+	case primary:
+		state = "PRIMARY"
+	case hidden:
+		state = "HIDDEN"
+	case secondary:
+		state = "SECONDARY"
+	}
+
+	health := 0
+	if reachable {
+		health = 1
+	}
+
+	member := map[string]any{"name": host["addr"], "stateStr": state, "health": health}
+	if ping, ok := host["pingTimeMillis"].(float64); ok {
+		member["pingMs"] = ping
+	}
+	return member
 }
 
 // summarizeReplSet flattens replSetGetStatus into a compact member list with

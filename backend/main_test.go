@@ -7,6 +7,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 func TestBuildMongoURIStripsDuplicatePort(t *testing.T) {
@@ -145,5 +148,61 @@ func TestHandleListInstancesUpstreamError(t *testing.T) {
 	}
 	if strings.Contains(recorder.Body.String(), "jwt-token") {
 		t.Fatal("error response must not expose the JWT")
+	}
+}
+
+func TestBuildShardedTopology(t *testing.T) {
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	shards := bson.A{
+		bson.M{"_id": "rs0", "host": "rs0/rs0-0:27017,rs0-1:27017", "state": int32(1)},
+		bson.M{"_id": "rs1", "host": "rs1/rs1-0:27017", "draining": true},
+	}
+	shardMap := bson.M{"rs0": "rs0/rs0-0:27017,rs0-1:27017", "config": "cfg/cfg-0:27017"}
+	monitored := bson.M{
+		"rs0": bson.M{"hosts": bson.A{
+			bson.M{"addr": "rs0-0:27017", "ok": true, "ismaster": true, "pingTimeMillis": 0.4},
+			bson.M{"addr": "rs0-1:27017", "ok": false, "secondary": true},
+		}},
+		"cfg": bson.M{"hosts": bson.A{
+			bson.M{"addr": "cfg-0:27017", "ok": true, "secondary": true, "hidden": true},
+		}},
+	}
+	routers := []mongosDoc{{ID: "mongos-0:27017", MongoVersion: "8.0.12", Up: 7200, Ping: now.Add(-5 * time.Second)}}
+
+	got := buildShardedTopology(shards, shardMap, monitored, routers, now)
+
+	want := map[string]any{
+		"shards": []map[string]any{
+			{
+				"id": "rs0", "set": "rs0", "draining": false,
+				"members": []map[string]any{
+					{"name": "rs0-0:27017", "stateStr": "PRIMARY", "health": 1, "pingMs": 0.4},
+					{"name": "rs0-1:27017", "stateStr": "UNREACHABLE", "health": 0},
+				},
+			},
+			{
+				// Not tracked by the mongos monitor: fall back to the shard host list.
+				"id": "rs1", "set": "rs1", "draining": true,
+				"members": []map[string]any{{"name": "rs1-0:27017", "stateStr": "UNKNOWN"}},
+			},
+		},
+		"configServers": map[string]any{
+			"set":     "cfg",
+			"members": []map[string]any{{"name": "cfg-0:27017", "stateStr": "HIDDEN", "health": 1}},
+		},
+		"routers": []map[string]any{
+			{"name": "mongos-0:27017", "version": "8.0.12", "uptimeSeconds": int64(7200), "lastPingSecondsAgo": 5.0},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected topology:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestBuildShardedTopologyWithoutData(t *testing.T) {
+	got := buildShardedTopology(nil, nil, nil, nil, time.Now())
+	want := map[string]any{"shards": []map[string]any{}, "routers": []map[string]any{}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected topology: %#v", got)
 	}
 }

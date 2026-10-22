@@ -8,6 +8,7 @@ import { errorText } from 'utils/error-message';
 import { Messages } from './cluster-overview.messages';
 import { isHealthy, isPendingError, opcountersSummary, overviewSummary } from './cluster-overview.utils';
 import { MemberTable } from './member-table/member-table';
+import { ShardedTopology } from './sharded-topology/sharded-topology';
 
 interface ClusterOverviewProps {
   k8sCluster: string;
@@ -49,6 +50,7 @@ export const ClusterOverview = ({ k8sCluster, cluster, namespace }: ClusterOverv
 
   const healthy = isHealthy(data);
   const connections = data.connections?.current;
+  const balancerMode = data.balancer?.mode;
 
   return (
     <Paper variant="outlined">
@@ -66,25 +68,22 @@ export const ClusterOverview = ({ k8sCluster, cluster, namespace }: ClusterOverv
             · {Messages.connections(connections)}
           </Typography>
         )}
-        {data.sharded && (
-          <Typography variant="body2" color="text.secondary">
-            · {Messages.shards(data.shards?.length ?? 0)}
-          </Typography>
-        )}
         <Box sx={{ ml: 'auto', display: 'flex', color: 'text.secondary' }}>
           {open ? <ExpandMoreIcon fontSize="small" /> : <ChevronRightIcon fontSize="small" />}
         </Box>
       </ButtonBase>
       <Collapse in={open} unmountOnExit>
         <Box sx={{ borderTop: 1, borderColor: 'divider', px: 1, pb: 1 }}>
-          {data.replicaSet ? (
+          {data.topology ? (
+            <ShardedTopology topology={data.topology} />
+          ) : data.replicaSet ? (
             <MemberTable members={data.replicaSet.members} />
           ) : (
             <Typography variant="body2" color="text.secondary" sx={{ p: 1 }}>
               {Messages.noReplicaSet}
             </Typography>
           )}
-          {(data.version || data.opcounters) && (
+          {(data.version || data.opcounters || balancerMode) && (
             <Stack direction="row" spacing={2} sx={{ px: 1, pt: 1, flexWrap: 'wrap' }}>
               {data.version && (
                 <Typography variant="caption" color="text.secondary">
@@ -94,6 +93,11 @@ export const ClusterOverview = ({ k8sCluster, cluster, namespace }: ClusterOverv
               {data.opcounters && (
                 <Typography variant="caption" color="text.secondary">
                   {Messages.opcounters(opcountersSummary(data.opcounters))}
+                </Typography>
+              )}
+              {balancerMode && (
+                <Typography variant="caption" color="text.secondary">
+                  {Messages.balancer(balancerMode, data.balancer?.inBalancerRound === true)}
                 </Typography>
               )}
             </Stack>
