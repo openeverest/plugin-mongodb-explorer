@@ -30,6 +30,8 @@ COPY --from=backend-builder /app/server ./server
 
 EXPOSE 8080
 
-USER nobody
+# Numeric non-root user so runAsNonRoot can be verified; OpenShift
+# restricted-v2 overrides the UID with one from the namespace range.
+USER 65532:65532
 
 CMD ["./server"]
